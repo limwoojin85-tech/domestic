@@ -24,9 +24,8 @@ def get_gspread_client():
         }
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
-    except Exception:
-        st.error("🔥 구글 인증 설정 오류")
-        st.code(traceback.format_exc())
+    except:
+        st.error("구글 인증 오류")
         return None
 
 def load_all_sheets():
@@ -35,28 +34,15 @@ def load_all_sheets():
     sh = client.open_by_key(st.secrets["spreadsheet_id"])
     return sh.get_worksheet(0), sh.get_worksheet(1)
 
-# --- 2. 카카오 인증 ---
+# --- 2. 카카오 로그인 설정 ---
 KAKAO_KEY = st.secrets["kakao"]["rest_api_key"]
 REDIRECT_URI = st.secrets["kakao"]["redirect_uri"].strip()
 
 def get_kakao_login_url():
     return f"https://kauth.kakao.com/oauth/authorize?client_id={KAKAO_KEY}&redirect_uri={REDIRECT_URI}&response_type=code"
 
-def get_kakao_user_info(code):
-    try:
-        token_url = "https://kauth.kakao.com/oauth/token"
-        data = {"grant_type": "authorization_code", "client_id": KAKAO_KEY, "redirect_uri": REDIRECT_URI, "code": code}
-        token_res = requests.post(token_url, data=data).json()
-        user_url = "https://kapi.kakao.com/v2/user/me"
-        user_res = requests.get(user_url, headers={"Authorization": f"Bearer {token_res['access_token']}"}).json()
-        return str(user_res.get("id")), user_res.get("properties", {}).get("nickname")
-    except:
-        return None, None
-
-# --- 3. 메인 로직 ---
+# --- 3. 메인 화면 ---
 st.set_page_config(page_title="인천농산물 통합 플랫폼", layout="wide")
-query_params = st.query_params
-auth_code = query_params.get("code")
 
 if 'user' not in st.session_state:
     st.title("🍎 인천농산물 통합 관리 시스템")
@@ -65,65 +51,48 @@ if 'user' not in st.session_state:
     with t1:
         in_id = st.text_input("아이디 (i+번호)").strip()
         in_pw = st.text_input("비밀번호", type="password").strip()
-        if st.button("로그인", use_container_width=True):
+        if st.button("로그인 실행", use_container_width=True):
             _, auth_sh = load_all_sheets()
-            users = pd.DataFrame(auth_sh.get_all_values())
-            users.columns = [c.strip() for c in users.iloc[0]] # [에러 해결] 공백 제거
-            users = users[1:]
+            # [핵심 수정] 컬럼명 공백 제거 및 대조 [cite: 2025-07-31]
+            all_vals = auth_sh.get_all_values()
+            headers = [h.strip() for h in all_vals[0]]
+            users = pd.DataFrame(all_vals[1:], columns=headers)
             
-            match = users[(users['아이디'] == in_id) & (users['비밀번호'] == in_pw)]
-            if not match.empty:
-                row = match.iloc[0]
-                if row['승인여부'] == 'Y':
-                    st.session_state.user = {"id": row['아이디'], "role": row['등급'], "num": row['아이디'].replace('i','')}
-                    st.rerun()
-                else: st.warning("⏳ 승인 대기 중입니다.")
-            else: st.error("❌ 정보를 확인하세요.")
+            if '승인여부' not in users.columns:
+                st.error("❌ 시트(Sheet2) 헤더에 '승인여부' 컬럼이 없습니다. 확인해 주세요.")
+            else:
+                match = users[(users['아이디'] == in_id) & (users['비밀번호'] == in_pw)]
+                if not match.empty:
+                    row = match.iloc[0]
+                    if row['승인여부'] == 'Y':
+                        st.session_state.user = {"id": row['아이디'], "role": row.get('등급', '중도매인'), "num": row['아이디'].replace('i','')}
+                        st.rerun()
+                    else: st.warning("⏳ 승인 대기 중입니다.")
+                else: st.error("❌ 아이디/비번이 틀립니다.")
 
     with t2:
         st.link_button("카카오로 본인인증 신청", get_kakao_login_url(), use_container_width=True)
-        if auth_code:
-            kid, knick = get_kakao_user_info(auth_code)
-            if kid:
-                target = st.text_input("중도매인 번호 (예: 002)")
-                if st.button("신청"):
-                    _, auth_sh = load_all_sheets()
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    # 등급 기본값은 '중도매인'으로 저장 [cite: 2025-07-31]
-                    auth_sh.append_row([f"i{target.zfill(3)}", target.zfill(3), kid, knick, "N", "중도매인", now])
-                    st.success("신청 완료! 관리자 승인을 기다리세요.")
+
 else:
-    # --- 로그인 후 등급별 메뉴 ---
+    # --- 로그인 성공: 데이터 조회 화면 ---
     u = st.session_state.user
     st.sidebar.title(f"👤 {u['id']}")
-    st.sidebar.info(f"등급: {u['role']}")
     
-    # 등급에 따른 메뉴 필터링 [cite: 2025-07-31]
     menu = ["내역 조회"]
-    if u['role'] in ['중도매인', '관리자', '회사 관계자']: menu.append("주문하기")
-    if u['role'] == '관리자': menu.append("사용자 관리")
-    
+    if u['role'] == '관리자': menu.append("시스템 관리")
     choice = st.sidebar.radio("메뉴", menu)
     
     if choice == "내역 조회":
-        st.header(f"📊 {u['num']}번 경락 내역 (2025)")
+        st.header(f"📊 {u['num']}번 경락 내역 (2025년 12월)")
         dat_sh, _ = load_all_sheets()
         df = pd.DataFrame(dat_sh.get_all_records())
-        if '경락일자' in df.columns:
-            dates = sorted(df['경락일자'].astype(str).unique(), reverse=True)
-            sel_date = st.selectbox("날짜 선택", dates)
-            df = df[df['경락일자'].astype(str) == sel_date]
         
-        df['코드_str'] = df['정산코드'].astype(str).str.strip()
-        my_data = df[df['코드_str'].isin([u['num'], str(int(u['num']))])]
-        st.dataframe(my_data, use_container_width=True)
-        if not my_data.empty:
-            total = pd.to_numeric(my_data['금액'], errors='coerce').sum()
-            st.metric("💰 총 낙찰액", f"{total:,.0f} 원")
-
-    elif choice == "주문하기":
-        st.header("🛒 중도매인 주문 플랫폼")
-        st.write("주문 기능은 카카오톡 채널과 연동 준비 중입니다.")
+        if not df.empty:
+            df['코드_str'] = df['정산코드'].astype(str).str.strip()
+            my_data = df[df['코드_str'].isin([u['num'], str(int(u['num']))])]
+            st.dataframe(my_data, use_container_width=True)
+        else:
+            st.warning("현재 조회 가능한 데이터가 없습니다.")
 
     if st.sidebar.button("로그아웃"):
         del st.session_state.user
