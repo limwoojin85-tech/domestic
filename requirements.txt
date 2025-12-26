@@ -1,0 +1,5 @@
+streamlit
+telethon
+gspread
+oauth2client
+pandas
