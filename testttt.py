@@ -26,17 +26,23 @@ def get_gspread_client():
 def load_all_data_raw():
     client = get_gspread_client()
     MEMBER_SID = "18j4vlva8sqbmP0h5Dgmjm06d1A83dgvcm239etoMalA"
+    ORDER_SID = "1jUwyFR3lge51ko8OGidbSrlN0gsjprssl4pYG-X4ITU"
+    DATA_SID = st.secrets["spreadsheet_id"]
+    
+    data_sh = client.open_by_key(DATA_SID).get_worksheet(0)
     member_sh = client.open_by_key(MEMBER_SID).get_worksheet(0)
-    # 다른 시트들은 기존 secrets 설정 유지
-    data_sh = client.open_by_key(st.secrets["spreadsheet_id"]).get_worksheet(0)
-    order_sh = client.open_by_key("1jUwyFR3lge51ko8OGidbSrlN0gsjprssl4pYG-X4ITU").get_worksheet(0)
+    order_sh = client.open_by_key(ORDER_SID).get_worksheet(0)
+    
     return data_sh, member_sh, order_sh
 
 st.set_page_config(page_title="인천농산물 통합 플랫폼", layout="wide")
 
+# 데이터 로드
 try:
     data_sh, member_sh, order_sh = load_all_data_raw()
+    records_df = pd.DataFrame(data_sh.get_all_records())
     members_df = pd.DataFrame(member_sh.get_all_records())
+    order_df = pd.DataFrame(order_sh.get_all_records())
 except Exception as e:
     st.error(f"데이터 로드 오류: {e}")
     st.stop()
@@ -51,68 +57,109 @@ if 'user' not in st.session_state:
             u_id = st.text_input("아이디 (i+번호)").strip()
             u_pw = st.text_input("비밀번호", type="password").strip()
             if st.form_submit_button("로그인", use_container_width=True):
-                # 시트 구조: 아이디(0), 비밀번호(1), 승인여부(4), 등급(5)
                 match = members_df[members_df['아이디'] == u_id]
                 if not match.empty:
                     row = match.iloc[0]
-                    if str(row['비밀번호']) == str(u_pw):
+                    if str(row['비밀번호']) == u_pw:
                         if str(row['승인여부']).upper() == 'Y':
                             st.session_state.user = {"id": row['아이디'], "role": row['등급'], "num": row['아이디'].replace('i','')}
                             st.rerun()
                         else: st.warning("⏳ 승인 대기 중입니다.")
-                    else: st.error("❌ 비밀번호가 틀렸습니다.")
-                else: st.error("❌ 아이디를 찾을 수 없습니다.")
-
+                    else: st.error("❌ 비밀번호 오류")
+                else: st.error("❌ 아이디 없음")
     with t2:
-        with st.form("reg_form"):
-            ni = st.text_input("아이디 (예: i005)")
-            npw = st.text_input("비밀번호", type="password")
-            nn = st.text_input("닉네임/상호")
-            nr = st.selectbox("등급", ["중도매인", "회사 관계자"])
+        with st.form("reg"):
+            ni, npw, nn, nr = st.text_input("아이디"), st.text_input("비번"), st.text_input("닉네임"), st.selectbox("등급", ["중도매인", "회사 관계자"])
             if st.form_submit_button("신청하기"):
-                # 시트 구조에 맞게 7개 컬럼 맞춰서 입력
-                member_sh.append_row([ni, npw, "", nn, "N", nr, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-                st.success("✅ 신청 완료! 관리자 승인 후 로그인 가능합니다.")
+                member_sh.append_row([ni, npw, "", nn, "N", nr, datetime.now().strftime("%Y-%m-%d")])
+                st.success("신청 완료")
 
-# --- 3. 메인 화면 ---
+# --- 3. 로그인 후 화면 ---
 else:
     u = st.session_state.user
     role = u['role']
     if u['id'] == 'limwoojin85':
-        m = st.sidebar.radio("🧪 테스터 모드", ["관리자", "중도매인"])
-        role = "관리자" if m == "관리자" else "중도매인"
+        m = st.sidebar.radio("🛠️ 모드 전환", ["관리자 모드", "중도매인 모드"])
+        role = "관리자" if "관리자" in m else "중도매인"
 
     menu = ["📄 내역 조회", "✍️ 주문서 작성", "🛒 주문 신청", "⚙️ 가입 승인 관리"] if role == "관리자" else ["📄 내역 조회", "🛒 주문 신청"]
-    choice = st.sidebar.radio("메뉴", menu)
+    choice = st.sidebar.radio("메뉴 이동", menu)
 
-    # --- 가입 승인 관리 (시트 구조 최적화) ---
-    if choice == "⚙️ 가입 승인 관리":
-        st.header("⚙️ 가입 신청 승인")
-        # 승인여부(4번째 인덱스)가 'N'인 데이터만 추출
-        wait_df = members_df[members_df['승인여부'] == 'N'].copy()
+    # --- [내역 조회] 개선: 당일/기간 모드 ---
+    if choice == "📄 내역 조회":
+        st.header("📊 경락 내역 조회")
+        df = records_df.copy()
+        df['경락일자'] = pd.to_datetime(df['경락일자'], format='%Y%m%d', errors='coerce')
         
+        c1, c2, c3 = st.columns([2, 2, 2])
+        with c1:
+            view_mode = st.radio("📅 조회 방식", ["당일 조회", "기간 설정"])
+        
+        with c2:
+            if view_mode == "당일 조회":
+                target_date = st.date_input("날짜 선택", date.today())
+                start_d, end_d = target_date, target_date
+            else:
+                period = st.date_input("기간 설정", [date.today() - timedelta(days=7), date.today()])
+                if len(period) == 2: start_d, end_d = period
+                else: start_d, end_d = period[0], period[0]
+        
+        with c3:
+            s_idx = st.text_input("🔍 중도매인 번호", "").strip().zfill(3) if role == "관리자" else u['num'].zfill(3)
+
+        # 필터링 적용
+        df = df[(df['경락일자'].dt.date >= start_d) & (df['경락일자'].dt.date <= end_d)]
+        if s_idx != "000":
+            df = df[df['정산코드'].astype(str).str.zfill(3) == s_idx]
+        
+        st.dataframe(df.sort_values('경락일자', ascending=False), use_container_width=True)
+        st.metric(f"{start_d} ~ {end_d} 합계", f"{pd.to_numeric(df['금액'], errors='coerce').sum():,.0f} 원")
+
+    # --- [주문서 작성] 복구 ---
+    elif choice == "✍️ 주문서 작성":
+        st.header("📝 새 주문서 발행 (발주)")
+        with st.form("order_create"):
+            pn = st.text_input("품목명")
+            ps = st.text_input("규격")
+            pp = st.number_input("단가", min_value=0)
+            pq = st.number_input("총 수량", min_value=1)
+            if st.form_submit_button("🚀 발주 및 시트 저장"):
+                if pn and ps:
+                    order_sh.append_row([datetime.now().strftime("%Y-%m-%d %H:%M"), pn, ps, pp, pq, "판매중"])
+                    st.success("발주가 완료되었습니다!")
+                    st.cache_data.clear()
+                else: st.warning("내용을 입력하세요.")
+
+    # --- [주문 신청] 복구 ---
+    elif choice == "🛒 주문 신청":
+        st.header("🛒 현재 판매 중인 품목")
+        if not order_df.empty:
+            active = order_df[order_df['상태'] == '판매중']
+            if active.empty: st.info("진행 중인 주문이 없습니다.")
+            for i, r in active.iterrows():
+                with st.expander(f"📦 {r['품목명']} ({r['규격']}) - {r['단가']:,}원"):
+                    req_q = st.number_input("신청 수량", min_value=0, max_value=int(r['수량']), key=f"q{i}")
+                    if st.button("신청하기", key=f"b{i}"):
+                        st.success(f"{r['품목명']} {req_q}개 신청 완료!")
+        else: st.info("등록된 주문서가 없습니다.")
+
+    # --- [가입 승인 관리] ---
+    elif choice == "⚙️ 가입 승인 관리":
+        st.header("⚙️ 신규 가입 승인")
+        wait_df = members_df[members_df['승인여부'] == 'N'].copy()
         if wait_df.empty:
-            st.info("현재 대기자가 없습니다.")
+            st.info("대기자가 없습니다.")
         else:
             all_sel = st.checkbox("전체 선택")
-            sel_ids = []
-            for i, r in wait_df.iterrows():
-                # 닉네임과 아이디 표시
-                is_chk = st.checkbox(f"{r['닉네임']} ({r['아이디']}) - 등급: {r['등급']}", value=all_sel, key=f"c_{r['아이디']}")
-                if is_chk: sel_ids.append(r['아이디'])
-            
-            if st.button("✅ 선택한 사용자 일괄 승인"):
-                if sel_ids:
-                    all_vals = member_sh.get_all_values()
-                    for tid in sel_ids:
-                        for idx, row in enumerate(all_vals):
-                            if row[0] == tid:
-                                # 승인여부는 5번째 열 (index 5, 1-based index이므로 5)
-                                member_sh.update_cell(idx+1, 5, 'Y')
-                    st.success(f"🎉 {len(sel_ids)}명 승인 완료!")
-                    st.rerun()
-                else:
-                    st.warning("승인할 대상을 선택하세요.")
+            sel_ids = [r['아이디'] for i, r in wait_df.iterrows() if st.checkbox(f"{r['닉네임']} ({r['아이디']})", value=all_sel, key=f"c_{r['아이디']}")]
+            if st.button("일괄 승인"):
+                all_vals = member_sh.get_all_values()
+                for tid in sel_ids:
+                    for idx, row in enumerate(all_vals):
+                        if row[0] == tid: member_sh.update_cell(idx+1, 5, 'Y')
+                st.success("승인 완료")
+                st.rerun()
 
-    # (기존 내역 조회, 주문서 작성 로직 유지...)
-    # ...
+    if st.sidebar.button("로그아웃"):
+        del st.session_state.user
+        st.rerun()
